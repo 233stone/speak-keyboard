@@ -67,7 +67,7 @@ def main() -> None:
     hotkeys.register(toggle_combo, lambda: _toggle(worker))
 
     try:
-        logger.info("Speak Keyboard 启动完成，按 %s 开始/停止录音", toggle_combo)
+        logger.info("Speak Keyboard 启动完成，按 %s 开始/停止录音，按 Ctrl+C 退出", toggle_combo)
         if args.once:
             _toggle(worker)
             input("按 Enter 停止并退出...")
@@ -80,6 +80,9 @@ def main() -> None:
         worker.stop()
         worker.cleanup()
         hotkeys.cleanup()
+        # 使用 os._exit(0) 立即终止进程，避免触发 FunASRServer 析构函数导致的延迟
+        import os
+        os._exit(0)
 
 
 def _make_result_handler(output_method: str, append_newline: bool, worker: TranscriptionWorker):

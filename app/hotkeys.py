@@ -41,5 +41,11 @@ class HotkeyManager:
 
     def cleanup(self) -> None:
         self.unregister_all()
+        # 彻底停止 keyboard 库的所有钩子和监听线程
+        try:
+            keyboard.unhook_all()
+            logger.info("已停止 keyboard 监听线程")
+        except Exception as exc:
+            logger.warning("停止 keyboard 监听线程失败: %s", exc)
 
 

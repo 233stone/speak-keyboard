@@ -134,34 +134,44 @@ class TranscriptionWorker:
         self._transcription_thread.start()
         logger.info("转录工作线程已启动")
 
-    def _stop_transcription_worker(self, timeout: float = 10.0) -> None:
-        """停止转录工作线程，等待队列清空"""
+    def _stop_transcription_worker(self, timeout: float = 3.0) -> None:
+        """停止转录工作线程，等待队列清空
+        
+        Args:
+            timeout: 等待队列清空的超时时间（秒），默认3秒
+        """
         if not self._transcription_running.is_set():
             logger.debug("转录工作线程未运行")
             return
         
-        logger.info("正在停止转录工作线程，等待队列清空...")
+        pending = self._transcription_queue.qsize()
+        if pending > 0:
+            logger.info(f"正在停止转录工作线程，队列中还有 {pending} 个任务，最多等待 {timeout} 秒...")
+        else:
+            logger.info("正在停止转录工作线程...")
         
         # 等待队列中的任务完成（最多等待timeout秒）
         start_time = time.time()
         while not self._transcription_queue.empty():
-            if time.time() - start_time > timeout:
-                logger.warning(f"等待转录队列清空超时（{timeout}秒），队列中还有 {self._transcription_queue.qsize()} 个任务")
+            elapsed = time.time() - start_time
+            if elapsed > timeout:
+                remaining = self._transcription_queue.qsize()
+                logger.warning(f"等待超时（{timeout}秒），强制退出，丢弃 {remaining} 个未完成任务")
                 break
             time.sleep(0.1)
         
         # 发送停止信号（None表示停止）
         self._transcription_running.clear()
         try:
-            self._transcription_queue.put(None, timeout=1.0)
+            self._transcription_queue.put(None, timeout=0.5)
         except queue.Full:
-            logger.warning("无法向转录队列发送停止信号")
+            logger.warning("转录队列已满，无法发送停止信号")
         
         # 等待线程结束
         if self._transcription_thread and self._transcription_thread.is_alive():
-            self._transcription_thread.join(timeout=5.0)
+            self._transcription_thread.join(timeout=2.0)
             if self._transcription_thread.is_alive():
-                logger.warning("转录工作线程未能在5秒内结束")
+                logger.warning("转录工作线程未能在2秒内结束，强制继续退出")
         
         self._transcription_thread = None
         logger.info(f"转录工作线程已停止，共完成 {self._transcription_completed_count}/{self._transcription_task_count} 个任务")

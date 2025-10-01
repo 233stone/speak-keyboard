@@ -126,6 +126,8 @@ class FunASRServer:
         """处理退出信号"""
         logger.info(f"收到信号 {signum}，准备退出...")
         self.running = False
+        # 重新抛出 KeyboardInterrupt 以确保程序能正常退出
+        raise KeyboardInterrupt()
 
     def _select_device(self):
         """自动选择推理设备"""
