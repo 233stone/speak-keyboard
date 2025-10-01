@@ -1,0 +1,5 @@
+FunASR/
+.venv
+.idea/
+logs
+*.mav
