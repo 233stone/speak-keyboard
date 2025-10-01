@@ -1,4 +1,14 @@
 sounddevice
 keyboard
 pyperclip
+numpy
+librosa
+soundfile
+torch>=1.13
+torchaudio>=0.13
+funasr>=1.0
+
+# Optional backends for model downloading (recommended)
+modelscope
+huggingface_hub
 
