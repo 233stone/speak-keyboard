@@ -91,3 +91,40 @@ def ensure_logging_dir(config: Dict[str, Any]) -> str:
     return log_dir
 
 
+def load_postprocess_config(path: Optional[str] = None) -> Dict[str, Any]:
+    """Load postprocess replacement config from JSON file.
+
+    If not provided, reads from project_root/config/postprocess.json.
+    Returns a dict with keys: replace_map (dict[str,str]), case_insensitive (bool).
+    Missing file gracefully returns empty mapping with case_insensitive=True.
+    """
+    # Determine default path relative to project root
+    if path is None:
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(project_root, "config", "postprocess.json")
+
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            replace_map = data.get("replace_map") or {}
+            case_insensitive = bool(data.get("case_insensitive", True))
+            if not isinstance(replace_map, dict):
+                replace_map = {}
+            # Ensure map keys/values are strings
+            safe_map: Dict[str, str] = {}
+            for k, v in replace_map.items():
+                try:
+                    if k is None or v is None:
+                        continue
+                    safe_map[str(k)] = str(v)
+                except Exception:
+                    continue
+            return {"replace_map": safe_map, "case_insensitive": case_insensitive}
+    except Exception:
+        # Fall through to defaults on any error
+        pass
+
+    return {"replace_map": {}, "case_insensitive": True}
+
+

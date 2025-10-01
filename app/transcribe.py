@@ -16,7 +16,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from .audio_capture import AudioCapture
-from .config import ensure_logging_dir, load_config
+from .config import ensure_logging_dir, load_config, load_postprocess_config
 from funasr_server import FunASRServer
 
 
@@ -384,6 +384,8 @@ class TranscriptionWorker:
             except OSError:
                 logger.debug("删除临时文件失败: %s", tmp_path)
 
+        # 不再依赖 hotword；仅保留后处理替换
+
         if not asr_result.get("success"):
             result = TranscriptionResult(
                 text="",
@@ -394,9 +396,45 @@ class TranscriptionWorker:
                 error=asr_result.get("error", "unknown"),
             )
         else:
+            # 应用可配置的替换映射，修正常见混淆词
+            final_text = asr_result.get("text", "")
+            raw_text = asr_result.get("raw_text", "")
+            # 加载外部后处理配置
+            post_cfg = load_postprocess_config()
+            replace_map = post_cfg.get("replace_map", {}) or {}
+            case_insensitive = bool(post_cfg.get("case_insensitive", True))
+
+            def _apply_replacements(value: str, label: str) -> str:
+                if not value or not replace_map:
+                    return value
+                try:
+                    if case_insensitive:
+                        import re
+                        for src, dst in replace_map.items():
+                            if not src:
+                                continue
+                            pattern = re.compile(re.escape(src), flags=re.IGNORECASE)
+                            new_val = pattern.sub(dst, value)
+                            if new_val != value:
+                                logger.info("后处理替换(%s): %r -> %r", label, src, dst)
+                            value = new_val
+                    else:
+                        for src, dst in replace_map.items():
+                            if not src:
+                                continue
+                            if src in value:
+                                logger.info("后处理替换(%s): %r -> %r", label, src, dst)
+                                value = value.replace(src, dst)
+                except Exception as exc:
+                    logger.warning("应用后处理替换失败(%s): %s", label, exc)
+                return value
+
+            final_text = _apply_replacements(final_text, "text")
+            raw_text = _apply_replacements(raw_text, "raw")
+
             result = TranscriptionResult(
-                text=asr_result.get("text", ""),
-                raw_text=asr_result.get("raw_text", ""),
+                text=final_text,
+                raw_text=raw_text,
                 duration=asr_result.get("duration", 0.0),
                 inference_latency=inference_latency,
                 confidence=asr_result.get("confidence", 0.0),
