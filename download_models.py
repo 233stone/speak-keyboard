@@ -8,6 +8,7 @@ FunASR模型下载脚本
 import sys
 import json
 import threading
+from funasr_config import MODEL_REVISION, get_models_for_download
 
 def download_model(model_config, progress_callback=None):
     """下载单个模型"""
@@ -23,7 +24,7 @@ def download_model(model_config, progress_callback=None):
         # 下载模型
         AutoModel(
             model=model_name,
-            model_revision="v2.0.4"
+            model_revision=MODEL_REVISION
         )
         
         if progress_callback:
@@ -39,50 +40,42 @@ def download_model(model_config, progress_callback=None):
 def main():
     """主函数：并行下载所有模型"""
     
-    # 模型配置
-    models = [
-        {
-            "name": "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
-            "type": "asr"
-        },
-        {
-            "name": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-            "type": "vad"
-        },
-        {
-            "name": "iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
-            "type": "punc"
-        }
-    ]
+    # 从统一配置获取模型列表
+    models = get_models_for_download()
     
     # 进度跟踪
     progress = {"asr": 0, "vad": 0, "punc": 0}
     results = {}
     completed_count = 0
     total_count = len(models)
+    count_lock = threading.Lock()  # 添加锁保护计数器
+    results_lock = threading.Lock()
     
     def progress_callback(model_type, stage, percent, error=None):
         nonlocal completed_count
         
-        if stage == "downloading":
-            progress[model_type] = percent
-        elif stage == "completed":
-            progress[model_type] = 100
-            completed_count += 1
-        elif stage == "error":
-            progress[model_type] = 0
-            completed_count += 1
+        # 使用锁保护共享变量的修改
+        with count_lock:
+            if stage == "downloading":
+                progress[model_type] = percent
+            elif stage == "completed":
+                progress[model_type] = 100
+                completed_count += 1
+            elif stage == "error":
+                progress[model_type] = 0
+                completed_count += 1
+            
+            # 计算总体进度
+            overall_progress = sum(progress.values()) / total_count
+            current_completed = completed_count
         
-        # 计算总体进度
-        overall_progress = sum(progress.values()) / total_count
-        
-        # 输出进度信息
+        # 输出进度信息（在锁外执行I/O操作）
         status = {
             "stage": stage,
             "model": model_type,
             "progress": percent,
             "overall_progress": round(overall_progress, 1),
-            "completed": completed_count,
+            "completed": current_completed,
             "total": total_count
         }
         
@@ -95,11 +88,12 @@ def main():
     # 启动并行下载线程
     threads = []
     for model_config in models:
-        thread = threading.Thread(
-            target=lambda config=model_config: results.update({
-                config["type"]: download_model(config, progress_callback)
-            })
-        )
+        def worker(config=model_config):
+            result = download_model(config, progress_callback)
+            with results_lock:
+                results[config["type"]] = result
+
+        thread = threading.Thread(target=worker, daemon=True)
         thread.start()
         threads.append(thread)
     

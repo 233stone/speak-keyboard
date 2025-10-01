@@ -1,5 +1,198 @@
 # 更新日志 (Changelog)
 
+## [2.1.0] - 2025-10-01
+
+### 🎉 新增功能
+
+#### 数据集收集功能（Dataset Collection）
+
+为模型微调场景设计的数据收集功能，可自动保存每次转录的音频和文本。
+
+**核心特性：**
+- **可选启用**：通过命令行参数 `--save-dataset` 启用，不影响正常使用
+- **自定义目录**：支持 `--dataset-dir` 指定保存位置（默认 `dataset/`）
+- **标准格式**：JSONL 格式，每行一条记录，方便后续处理
+- **完整信息**：保存音频文件、转录文本、元数据（时长、置信度等）
+- **原子操作**：文件写入使用原子操作，确保数据完整性
+- **容错设计**：数据保存失败不影响正常的语音输入功能
+
+**使用方法：**
+```bash
+# 启用数据集收集
+python main.py --save-dataset
+
+# 自定义保存目录
+python main.py --save-dataset --dataset-dir my_training_data
+```
+
+**数据格式：**
+```
+dataset/
+├── audio/                          # 音频文件
+│   └── 20251001_120000_123456-abcd1234.wav
+└── dataset.jsonl                   # 元数据（JSONL格式）
+```
+
+**元数据字段：**
+- `id`: 唯一标识符（时间戳 + UUID）
+- `audio`: 音频文件相对路径
+- `text`: 转录后的文本（经过后处理）
+- `raw_text`: 原始转录文本（模型直接输出）
+- `duration`: 音频时长（秒）
+- `sample_rate`: 采样率
+- `inference_latency`: 推理耗时（秒）
+- `confidence`: 转录置信度（0-1）
+- `timestamp`: 转录时间戳（UTC）
+
+**音频格式与默认目录：**
+- 音频编码：WAV（16-bit PCM，单声道）
+- 采样率：来自配置 `audio.sample_rate`（默认 16000Hz）
+- 保存位置：默认 `dataset/`，可通过 `--dataset-dir` 覆盖
+
+### 🔧 技术实现
+
+#### AOP 设计模式
+采用面向切面编程（AOP）思想，通过装饰器模式包装 result handler：
+- **零侵入**：不修改原有业务代码
+- **可插拔**：可随时启用/禁用
+- **隔离性**：数据保存逻辑与转录逻辑完全分离
+
+```python
+# 原始 handler
+worker.on_result = _make_result_handler(...)
+
+# 启用数据集收集时自动包装
+if args.save_dataset:
+    worker.on_result = wrap_result_handler(worker.on_result, worker, dataset_dir)
+```
+
+#### 执行顺序优化
+先执行原始 handler（确保语音输入正常），再保存数据集（失败不影响功能，AOP 包装器会吞掉异常并记录日志）：
+```python
+# 1. 先执行原始逻辑（语音输入）
+handler_result = handler(result)
+
+# 2. 再保存数据集（容错处理）
+try:
+    save_dataset()
+except Exception:
+    logger.error("保存失败但不影响正常使用")
+```
+
+#### 日志增强
+- 启动时显示数据保存路径
+- 每次保存成功记录样本 ID 和文本预览
+- 保存失败时记录详细错误信息和堆栈
+- 跳过低质量样本时记录原因
+
+### 📝 文档更新
+
+- **新增** `docs/dataset-collection.md`：数据集收集功能完整文档
+  - 使用方法和命令行参数
+  - 数据格式说明
+  - 数据处理示例代码
+  - 微调建议和最佳实践
+  - 常见问题解答
+
+- **新增** `scripts/view_dataset.py`：数据集查看和统计工具
+  - 显示数据集统计信息（样本数、总时长、平均置信度等）
+  - 查看最近的样本
+  - 过滤低质量样本
+  - 支持命令行参数自定义
+
+### 🛠️ 配套工具
+
+#### 数据集查看工具
+```bash
+# 查看数据集统计
+python scripts/view_dataset.py
+
+# 只显示高质量样本
+python scripts/view_dataset.py --filter --min-confidence 0.85
+```
+
+**功能：**
+- 统计总样本数、总时长、平均时长
+- 显示平均推理时间、置信度
+- 文本长度统计（平均、最大、最小）
+- 查看最近N条样本
+- 过滤低质量样本并重新统计
+
+### 🔍 技术细节
+
+#### 新增文件
+- `app/plugins/__init__.py`: 插件包初始化（1行）
+- `app/plugins/dataset_recorder.py`: 数据集记录器核心实现（109行）
+- `docs/dataset-collection.md`: 完整使用文档（236行）
+- `scripts/view_dataset.py`: 数据集查看工具（131行）
+
+#### 修改文件
+- `main.py`: 添加命令行参数和 handler 包装逻辑（+6行）
+- `.gitignore`: 排除 `dataset/` 和 `__pycache__/`（+2行）
+
+#### 新增依赖
+无新增外部依赖（仅使用 Python 标准库）
+
+#### 配置变化
+无配置文件修改，完全通过命令行参数控制
+
+### 📊 适用场景
+
+1. **个人模型微调**
+   - 收集自己的语音数据
+   - 针对个人口音、说话习惯微调
+   - 提升识别准确率
+
+2. **特定领域优化**
+   - 收集专业术语、行业黑话
+   - 训练领域适配模型
+   - 改善专业场景识别效果
+
+3. **质量监控**
+   - 定期检查转录质量
+   - 发现模型弱点
+   - 收集困难样本
+
+4. **数据分析**
+   - 统计使用习惯
+   - 分析常用词汇
+   - 优化工作流程
+
+### ⚠️ 注意事项
+
+1. **存储空间**：音频文件占用空间较大，建议定期清理或备份
+2. **隐私保护**：录音可能包含敏感信息，请妥善保管数据
+3. **数据质量**：建议定期检查转录质量，过滤低质量样本
+4. **向后兼容**：不使用 `--save-dataset` 参数时，行为与 v2.0 完全一致
+
+### 🎯 使用示例
+
+```bash
+# 1. 启动数据收集
+python main.py --save-dataset --dataset-dir my_data
+
+# 2. 正常使用语音输入（按 F2 录音）
+# ... 使用一段时间 ...
+
+# 3. 查看收集的数据
+python scripts/view_dataset.py --dataset-dir my_data
+
+# 4. 过滤高质量数据
+python scripts/view_dataset.py --dataset-dir my_data --filter --min-confidence 0.9
+
+# 5. 使用文档中的脚本进行数据处理和微调
+```
+
+### 🔜 后续计划
+
+- [ ] 自动去重功能
+- [ ] 数据导出为其他格式（CSV、Parquet）
+- [ ] 集成数据标注工具
+- [ ] 支持数据增强（噪声、速度变化）
+- [ ] 自动数据质量评估
+
+---
+
 ## [2.0.0] - 2025-10-01
 
 ### 🎉 重大更新：异步转录架构

@@ -22,10 +22,19 @@ _last_toggle_time = 0.0
 
 
 def _configure_logging(level: str) -> None:
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    """配置主应用日志级别，不干扰已有的 handler 配置"""
+    # 设置根日志器的级别，但不添加新的 handler
+    # 这样可以控制所有日志的级别，同时保留 funasr_server 等模块的 handler 配置
+    root_logger = logging.getLogger()
+    root_logger.setLevel(getattr(logging, level.upper(), logging.INFO))
+    
+    # 如果还没有 handler，添加一个控制台 handler（用于其他模块）
+    if not root_logger.handlers:
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        )
+        root_logger.addHandler(console_handler)
 
 
 def parse_args() -> argparse.Namespace:

@@ -10,41 +10,73 @@ import json
 import logging
 import traceback
 import signal
-
-
-# 设置日志
 import tempfile
 import os
+import sys
+
+# 在导入任何深度学习库之前设置环境变量
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+
+from funasr_config import MODEL_REVISION, MODELS
 
 
 # 获取日志文件路径
 def get_log_path():
-    # 尝试从环境变量获取用户数据目录
+    """获取日志文件路径，保存到项目的 logs/ 目录"""
+    # 获取项目根目录（funasr_server.py 所在目录）
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    
+    # 尝试从环境变量获取日志目录，否则使用项目目录下的 logs/
     if "ELECTRON_USER_DATA" in os.environ:
         log_dir = os.path.join(os.environ["ELECTRON_USER_DATA"], "logs")
     else:
-        # 回退到临时目录
-        log_dir = os.path.join(tempfile.gettempdir(), "ququ_logs")
+        log_dir = os.path.join(project_root, "logs")
 
     # 确保日志目录存在
     os.makedirs(log_dir, exist_ok=True)
     return os.path.join(log_dir, "funasr_server.log")
 
 
-log_file_path = get_log_path()
+def setup_logging(enable_console=True):
+    """配置日志系统，带日志轮转功能
+    
+    Args:
+        enable_console: 是否输出到控制台（CLI模式启用，stdin/stdout通信模式禁用）
+    """
+    from logging.handlers import RotatingFileHandler
+    
+    log_file_path = get_log_path()
+    
+    # 使用 RotatingFileHandler 实现日志轮转
+    # maxBytes: 单个日志文件最大 10 MB
+    # backupCount: 保留 3 个备份文件（总共最多 40 MB）
+    file_handler = RotatingFileHandler(
+        log_file_path,
+        maxBytes=10 * 1024 * 1024,  # 10 MB
+        backupCount=3,
+        encoding="utf-8"
+    )
+    
+    handlers = [file_handler]
+    
+    # 只在CLI模式下输出到控制台
+    if enable_console:
+        handlers.append(logging.StreamHandler(sys.stderr))  # 使用stderr避免干扰stdout
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=handlers,
+        force=True,  # 强制重新配置
+    )
+    
+    logger = logging.getLogger(__name__)
+    logger.info(f"FunASR服务器日志文件: {log_file_path} (最大10MB，保留3个备份)")
+    return logger
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(log_file_path, encoding="utf-8"),
-        logging.StreamHandler(),  # 同时输出到控制台
-    ],
-)
-logger = logging.getLogger(__name__)
 
-# 记录日志文件位置
-logger.info(f"FunASR服务器日志文件: {log_file_path}")
+# 模块导入时自动初始化日志配置（CLI模式下会重新配置）
+logger = setup_logging(enable_console=True)
 
 
 
@@ -59,20 +91,12 @@ class FunASRServer:
         self.transcription_count = 0  # 转录计数器
         self.total_audio_duration = 0.0  # 总音频时长
 
-        self.model_revision = os.environ.get("FUNASR_MODEL_REVISION", "v2.0.4")
+        # 使用统一配置
+        self.model_revision = MODEL_REVISION
         self.model_names = {
-            "asr": os.environ.get(
-                "FUNASR_ASR_MODEL",
-                "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
-            ),
-            "vad": os.environ.get(
-                "FUNASR_VAD_MODEL",
-                "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-            ),
-            "punc": os.environ.get(
-                "FUNASR_PUNC_MODEL",
-                "iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
-            ),
+            "asr": MODELS["asr"]["name"],
+            "vad": MODELS["vad"]["name"],
+            "punc": MODELS["punc"]["name"],
         }
 
         self.device = self._select_device()
@@ -85,9 +109,6 @@ class FunASRServer:
         # 设置信号处理
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
-
-        # 生产环境优化：设置运行时参数
-        self._setup_runtime_environment()
 
     def __del__(self):
         """析构函数，确保释放模型资源"""
@@ -112,22 +133,16 @@ class FunASRServer:
         except Exception as e:
             logger.error(f"清理 FunASR 资源时出错: {str(e)}")
 
-    def _setup_runtime_environment(self):
-        """设置运行时环境变量以优化性能"""
-        try:
-            import os
-            # 设置线程数优化
-            os.environ["OMP_NUM_THREADS"] = "4"
-            logger.info("运行时环境变量设置完成")
-        except Exception as e:
-            logger.warning(f"环境设置失败: {str(e)}")
-
     def _signal_handler(self, signum, frame):
-        """处理退出信号"""
+        """处理退出信号，清理资源后正常退出"""
         logger.info(f"收到信号 {signum}，准备退出...")
         self.running = False
-        # 重新抛出 KeyboardInterrupt 以确保程序能正常退出
-        raise KeyboardInterrupt()
+        try:
+            self.cleanup()
+        except Exception as e:
+            logger.error(f"信号处理中清理资源失败: {str(e)}")
+        # 正常退出
+        sys.exit(0)
 
     def _select_device(self):
         """自动选择推理设备"""
@@ -230,13 +245,19 @@ class FunASRServer:
             # 创建并启动三个并行线程
             threads = [
                 threading.Thread(
-                    target=load_model_thread, args=("asr", self._load_asr_model)
+                    target=load_model_thread,
+                    args=("asr", self._load_asr_model),
+                    daemon=True,
                 ),
                 threading.Thread(
-                    target=load_model_thread, args=("vad", self._load_vad_model)
+                    target=load_model_thread,
+                    args=("vad", self._load_vad_model),
+                    daemon=True,
                 ),
                 threading.Thread(
-                    target=load_model_thread, args=("punc", self._load_punc_model)
+                    target=load_model_thread,
+                    args=("punc", self._load_punc_model),
+                    daemon=True,
                 ),
             ]
 
@@ -245,15 +266,20 @@ class FunASRServer:
                 thread.start()
 
             # 等待所有线程完成，设置超时
+            timeout_occurred = False
             for thread in threads:
                 thread.join(timeout=300)  # 5分钟超时
                 if thread.is_alive():
-                    logger.error(f"模型加载线程超时")
-                    return {
-                        "success": False,
-                        "error": "模型加载超时",
-                        "type": "timeout_error",
-                    }
+                    timeout_occurred = True
+                    logger.error("模型加载线程超时，线程仍在运行")
+            
+            # 检查是否有超时
+            if timeout_occurred:
+                return {
+                    "success": False,
+                    "error": "模型加载超时（超过5分钟）",
+                    "type": "timeout_error",
+                }
 
             # 检查加载结果
             failed_models = [name for name, success in results.items() if not success]
@@ -472,6 +498,9 @@ def _build_cli_parser():
 def main():
     parser = _build_cli_parser()
     args = parser.parse_args()
+
+    global logger
+    logger = setup_logging(enable_console=True)
 
     server = FunASRServer()
     init_result = server.initialize()
