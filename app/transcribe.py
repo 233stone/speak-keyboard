@@ -64,6 +64,16 @@ class TranscriptionWorker:
         self._audio_cfg = audio_cfg
         self._buffer: list[np.ndarray] = []
         self._buffer_lock = threading.Lock()
+        # 单次会话大小限制（字节）与计数器（配置健壮性：转换为正整型，非法回退至20MB）
+        try:
+            raw_limit = audio_cfg.get("max_session_bytes", 20 * 1024 * 1024)
+            self._max_session_bytes: int = int(raw_limit)
+            if self._max_session_bytes <= 0:
+                raise ValueError
+        except Exception:
+            self._max_session_bytes = 20 * 1024 * 1024
+            logger.warning("max_session_bytes 配置非法，已回退至 20MB")
+        self._session_bytes: int = 0
         
         # 异步转录队列和工作线程
         self._transcription_queue: "queue.Queue[Optional[np.ndarray]]" = queue.Queue(maxsize=10)
@@ -193,12 +203,18 @@ class TranscriptionWorker:
         self._stop_requested.clear()
         with self._buffer_lock:
             self._buffer.clear()
+            self._session_bytes = 0
         self.audio.start()
         self._recording.set()
         self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._capture_thread.start()
 
-    def stop(self) -> None:
+    def stop(self, _from_capture_thread: bool = False) -> None:
+        """停止录音并提交转录任务
+        
+        Args:
+            _from_capture_thread: 内部参数，标识是否从capture线程调用（避免死锁）
+        """
         if not self._running.is_set():
             logger.debug("Transcription worker 未运行，忽略 stop")
             return
@@ -207,9 +223,12 @@ class TranscriptionWorker:
         self._stop_requested.set()
         self._running.clear()
         self._recording.clear()
-        if self._capture_thread and self._capture_thread.is_alive():
-            self._capture_thread.join(timeout=5)
-        self._capture_thread = None
+        
+        # 只有从外部调用时才join capture线程，避免自己join自己
+        if not _from_capture_thread:
+            if self._capture_thread and self._capture_thread.is_alive():
+                self._capture_thread.join(timeout=5)
+            self._capture_thread = None
 
         self.audio.stop()
         combined = self._combine_buffer()
@@ -242,10 +261,27 @@ class TranscriptionWorker:
                 with self._buffer_lock:
                     if isinstance(frame, np.ndarray):
                         self._buffer.append(frame)
+                        bytes_added = frame.nbytes
                     else:
-                        self._buffer.append(np.frombuffer(frame, dtype=np.int16))
+                        arr = np.frombuffer(frame, dtype=np.int16)
+                        self._buffer.append(arr)
+                        bytes_added = arr.nbytes
+                    self._session_bytes += bytes_added
             except Exception as exc:
                 logger.error("处理音频帧时出错: %s", exc)
+
+            # 达到单次会话大小上限后，自动停止录音
+            if self._session_bytes >= self._max_session_bytes and not self._stop_requested.is_set():
+                logger.warning(
+                    "单次录音大小达到上限，自动停止（%s/%s 字节，%.2f/%.2f MB）",
+                    self._session_bytes,
+                    self._max_session_bytes,
+                    self._session_bytes / (1024 * 1024),
+                    self._max_session_bytes / (1024 * 1024),
+                )
+                # 从capture线程调用stop，传入标志避免死锁
+                self.stop(_from_capture_thread=True)
+                break  # 停止后立即退出循环
 
         with self._buffer_lock:
             frame_count = len(self._buffer)

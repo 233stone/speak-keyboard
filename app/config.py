@@ -10,7 +10,14 @@ from typing import Any, Dict, Optional
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "hotkeys": {"toggle": "f2", "dump_last": "ctrl+alt+s"},
-    "audio": {"sample_rate": 16000, "block_ms": 20, "device": None},
+    "audio": {
+        "sample_rate": 16000,
+        "block_ms": 20,
+        "device": None,
+        # 单次录音的最大大小（字节），默认20MB
+        # 达到此限制后将自动停止录音并开始转录
+        "max_session_bytes": 20 * 1024 * 1024,
+    },
     "vad": {
         "start_threshold": 0.02,
         "stop_threshold": 0.01,

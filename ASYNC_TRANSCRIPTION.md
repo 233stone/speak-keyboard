@@ -128,6 +128,19 @@ self._transcription_queue: "queue.Queue[Optional[np.ndarray]]" = queue.Queue(max
 self._stop_transcription_worker(timeout=10.0)
 ```
 
+### 录音大小兜底（新）
+
+- 默认单次录音最大大小为 20MB。达到阈值会自动停止录音并提交转录，日志同时显示字节与 MB。
+- 可在配置中调整：
+
+```python
+# app/config.py
+"audio": {
+    ...
+    "max_session_bytes": 20 * 1024 * 1024,  # 单次录音大小上限
+}
+```
+
 ## 🎉 用户体验提升
 
 - ✅ **无感知延迟**：按F2立即响应，不再卡顿

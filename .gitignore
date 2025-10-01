@@ -2,4 +2,4 @@ FunASR/
 .venv
 .idea/
 logs
-*.mav
+*.wav
