@@ -404,6 +404,7 @@ class TranscriptionWorker:
             replace_map = post_cfg.get("replace_map", {}) or {}
             case_insensitive = bool(post_cfg.get("case_insensitive", True))
 
+            # todo:后期词多了使用前缀树加速
             def _apply_replacements(value: str, label: str) -> str:
                 if not value or not replace_map:
                     return value
