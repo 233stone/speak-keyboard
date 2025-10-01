@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import argparse
 import logging
+import threading
+import time
+
 import keyboard
 
 from app import HotkeyManager, TranscriptionResult, TranscriptionWorker, load_config, type_text
 
 
 logger = logging.getLogger(__name__)
+
+
+_TOGGLE_DEBOUNCE_SECONDS = 0.2
+_toggle_lock = threading.Lock()
+_last_toggle_time = 0.0
 
 
 def _configure_logging(level: str) -> None:
@@ -96,6 +104,14 @@ def _make_result_handler(output_method: str, append_newline: bool, worker: Trans
 
 
 def _toggle(worker: TranscriptionWorker) -> None:
+    global _last_toggle_time
+    now = time.monotonic()
+    with _toggle_lock:
+        if now - _last_toggle_time < _TOGGLE_DEBOUNCE_SECONDS:
+            logger.debug("忽略快速重复的录音切换请求 (%.3fs)", now - _last_toggle_time)
+            return
+        _last_toggle_time = now
+
     if worker.is_running:
         # 停止录音，提交转录任务
         worker.stop()

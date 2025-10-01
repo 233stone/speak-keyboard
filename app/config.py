@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "hotkeys": {"toggle": "f2", "dump_last": "ctrl+alt+s"},
+    "hotkeys": {"toggle": "f2"},
     "audio": {
         "sample_rate": 16000,
         "block_ms": 20,

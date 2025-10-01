@@ -8,6 +8,7 @@ import queue
 import tempfile
 import threading
 import time
+import itertools
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -44,6 +45,8 @@ class TranscriptionWorker:
         self.on_result = on_result
         self.log_dir = ensure_logging_dir(self.config)
         self.last_segment_path: Optional[Path] = None
+        self._session_id_counter = itertools.count(1)
+        self._current_session_id: Optional[int] = None
 
         audio_cfg = self.config["audio"]
         self.audio = AudioCapture(
@@ -61,6 +64,7 @@ class TranscriptionWorker:
         self._recording = threading.Event()
         self._stop_requested = threading.Event()
         self._capture_thread: Optional[threading.Thread] = None
+        self._state_lock = threading.RLock()
         self._audio_cfg = audio_cfg
         self._buffer: list[np.ndarray] = []
         self._buffer_lock = threading.Lock()
@@ -194,20 +198,23 @@ class TranscriptionWorker:
         logger.info("转录工作线程已退出")
 
     def start(self) -> None:
-        if self._running.is_set():
-            logger.debug("Transcription worker 已在运行，忽略重复启动")
-            return
+        with self._state_lock:
+            if self._running.is_set():
+                logger.debug("Transcription worker 已在运行，忽略重复启动")
+                return
 
-        logger.info("Transcription worker starting")
-        self._running.set()
-        self._stop_requested.clear()
-        with self._buffer_lock:
-            self._buffer.clear()
-            self._session_bytes = 0
-        self.audio.start()
-        self._recording.set()
-        self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
-        self._capture_thread.start()
+            session_id = next(self._session_id_counter)
+            logger.info("Transcription worker starting (session_id=%s)", session_id)
+            self._running.set()
+            self._stop_requested.clear()
+            with self._buffer_lock:
+                self._buffer.clear()
+                self._session_bytes = 0
+            self.audio.start()
+            self._recording.set()
+            self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+            self._capture_thread.start()
+            self._current_session_id = session_id
 
     def stop(self, _from_capture_thread: bool = False) -> None:
         """停止录音并提交转录任务
@@ -215,37 +222,62 @@ class TranscriptionWorker:
         Args:
             _from_capture_thread: 内部参数，标识是否从capture线程调用（避免死锁）
         """
-        if not self._running.is_set():
-            logger.debug("Transcription worker 未运行，忽略 stop")
-            return
+        # 第一阶段：在锁内快速更新状态并保存资源引用
+        with self._state_lock:
+            if not self._running.is_set():
+                logger.debug("Transcription worker 未运行，忽略 stop")
+                return
 
-        logger.info("Transcription worker stopping")
-        self._stop_requested.set()
-        self._running.clear()
-        self._recording.clear()
+            session_id = self._current_session_id
+            reason = "size_limit" if self._session_bytes >= self._max_session_bytes else "user"
+            logger.info("Transcription worker stopping (session_id=%s, reason=%s)", session_id, reason)
+            self._stop_requested.set()
+            self._running.clear()
+            self._recording.clear()
+            
+            # 保存当前会话的线程引用，避免操作到新会话的线程
+            capture_thread_to_join = self._capture_thread
+            # 清空线程引用，允许新会话创建新线程
+            self._capture_thread = None
+        
+        # 第二阶段：在锁外执行耗时操作
+        self.audio.stop()
         
         # 只有从外部调用时才join capture线程，避免自己join自己
+        # 使用保存的线程引用，而不是self._capture_thread
         if not _from_capture_thread:
-            if self._capture_thread and self._capture_thread.is_alive():
-                self._capture_thread.join(timeout=5)
-            self._capture_thread = None
+            if capture_thread_to_join and capture_thread_to_join.is_alive():
+                capture_thread_to_join.join(timeout=5)
 
-        self.audio.stop()
         combined = self._combine_buffer()
         self.audio.flush()
 
         if combined is None or combined.size == 0:
-            logger.warning("未捕获到任何音频样本，跳过转写")
+            logger.warning("未捕获到任何音频样本，跳过转写 (session_id=%s)", session_id)
+            with self._state_lock:
+                self._current_session_id = None
             return
 
         # 将音频数据提交到转录队列，立即返回（异步处理）
         try:
             self._transcription_queue.put_nowait(combined)
-            self._transcription_task_count += 1
-            logger.info(f"录音已提交到转录队列（任务 #{self._transcription_task_count}），队列中有 {self._transcription_queue.qsize()} 个待处理任务")
+            # 更新计数器时需要锁保护
+            with self._state_lock:
+                self._transcription_task_count += 1
+                task_count = self._transcription_task_count
+            logger.info(
+                "录音已提交到转录队列（session_id=%s，任务 #%s），队列中有 %s 个待处理任务",
+                session_id,
+                task_count,
+                self._transcription_queue.qsize(),
+            )
         except queue.Full:
-            logger.error("转录队列已满，无法提交新任务！请等待当前转录完成。")
+            logger.error("转录队列已满，无法提交新任务 (session_id=%s)！请等待当前转录完成。", session_id)
             # 即使队列满了，也不阻塞用户，只是记录错误
+        
+        # 最后清理session_id
+        with self._state_lock:
+            self._current_session_id = None
 
     def _capture_loop(self) -> None:
         queue_obj = self.audio.queue
@@ -307,11 +339,14 @@ class TranscriptionWorker:
         sample_rate = self._audio_cfg["sample_rate"]
         recent_path = Path(self.log_dir) / "recent.wav"
         os.makedirs(recent_path.parent, exist_ok=True)
-        with wave.open(str(recent_path), "wb") as wf_recent:
+        tmp_recent_fd, tmp_recent_path = tempfile.mkstemp(prefix="recent_", suffix=".wav", dir=recent_path.parent)
+        os.close(tmp_recent_fd)
+        with wave.open(str(tmp_recent_path), "wb") as wf_recent:
             wf_recent.setnchannels(1)
             wf_recent.setsampwidth(2)
             wf_recent.setframerate(sample_rate)
             wf_recent.writeframes(samples.tobytes())
+        os.replace(tmp_recent_path, recent_path)
         self.last_segment_path = recent_path
 
         fd, path = tempfile.mkstemp(prefix="asr_session_", suffix=".wav")

@@ -128,7 +128,7 @@ self._transcription_queue: "queue.Queue[Optional[np.ndarray]]" = queue.Queue(max
 self._stop_transcription_worker(timeout=10.0)
 ```
 
-### 录音大小兜底（新）
+### 录音大小兜底
 
 - 默认单次录音最大大小为 20MB。达到阈值会自动停止录音并提交转录，日志同时显示字节与 MB。
 - 可在配置中调整：
@@ -140,6 +140,28 @@ self._stop_transcription_worker(timeout=10.0)
     "max_session_bytes": 20 * 1024 * 1024,  # 单次录音大小上限
 }
 ```
+
+### 并发控制与线程安全
+
+#### 防抖机制
+- 热键触发添加200ms防抖，避免快速重复按键导致状态混乱
+- 实现位置：`main.py` 的 `_toggle()` 函数
+- 使用 `time.monotonic()` 确保不受系统时间调整影响
+
+#### 锁粒度优化
+- `stop()` 方法采用两阶段设计：
+  1. **第一阶段（锁内）**：快速更新共享状态，保存资源引用
+  2. **第二阶段（锁外）**：执行耗时操作（I/O、线程join、音频处理）
+- 减少锁持有时间，提高并发性能
+
+#### 资源隔离
+- `stop()` 在锁内保存当前会话的线程引用
+- 锁外操作保存的引用，避免操作到新会话的资源
+- 防止"旧stop处理 + 新start启动"的竞态条件
+
+#### 死锁避免
+- capture线程调用 `stop(_from_capture_thread=True)` 跳过线程join
+- 防止线程等待自己导致的死锁
 
 ## 🎉 用户体验提升
 
