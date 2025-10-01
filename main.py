@@ -39,10 +39,15 @@ def main() -> None:
     output_method = output_cfg.get("method", "auto")
     append_newline = output_cfg.get("append_newline", False)
 
+    # 先创建worker（没有回调）
     worker = TranscriptionWorker(
         config_path=args.config,
-        on_result=_make_result_handler(output_method, append_newline),
+        on_result=None,  # 稍后设置
     )
+    
+    # 创建result handler（需要worker引用）
+    worker.on_result = _make_result_handler(output_method, append_newline, worker)
+    
     hotkeys = HotkeyManager()
 
     toggle_combo = config["hotkeys"].get("toggle", "f2")
@@ -64,16 +69,22 @@ def main() -> None:
         hotkeys.cleanup()
 
 
-def _make_result_handler(output_method: str, append_newline: bool):
+def _make_result_handler(output_method: str, append_newline: bool, worker: TranscriptionWorker):
     def _handle_result(result: TranscriptionResult) -> None:
         if result.error:
             logger.error("转写失败: %s", result.error)
             return
 
+        # 获取转录统计信息
+        stats = worker.transcription_stats
+        
         logger.info(
-            "转写成功: %s (推理 %.2fs)",
+            "转写成功: %s (推理 %.2fs) [已完成 %d/%d，队列剩余 %d]",
             result.text,
             result.inference_latency,
+            stats["completed"],
+            stats["submitted"],
+            stats["pending"],
         )
         type_text(
             result.text,
@@ -86,8 +97,22 @@ def _make_result_handler(output_method: str, append_newline: bool):
 
 def _toggle(worker: TranscriptionWorker) -> None:
     if worker.is_running:
+        # 停止录音，提交转录任务
         worker.stop()
+        stats = worker.transcription_stats
+        if stats["pending"] > 0:
+            logger.info(
+                "录音已停止并提交转录，队列中还有 %d 个任务等待处理",
+                stats["pending"]
+            )
     else:
+        # 开始录音
+        stats = worker.transcription_stats
+        if stats["pending"] > 0:
+            logger.info(
+                "开始录音（后台还有 %d 个转录任务正在处理）",
+                stats["pending"]
+            )
         worker.start()
 
 
