@@ -3,3 +3,5 @@ FunASR/
 .idea/
 logs
 *.wav
+dataset/
+__pycache__/

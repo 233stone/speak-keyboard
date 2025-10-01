@@ -10,6 +10,7 @@ import time
 import keyboard
 
 from app import HotkeyManager, TranscriptionResult, TranscriptionWorker, load_config, type_text
+from app.plugins.dataset_recorder import wrap_result_handler
 
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run a single transcription cycle for debugging",
     )
+    parser.add_argument("--save-dataset", action="store_true", help="Persist audio/text pairs")
+    parser.add_argument("--dataset-dir", default="dataset", help="Dataset output directory")
     return parser.parse_args()
 
 
@@ -55,6 +58,8 @@ def main() -> None:
     
     # 创建result handler（需要worker引用）
     worker.on_result = _make_result_handler(output_method, append_newline, worker)
+    if args.save_dataset:
+        worker.on_result = wrap_result_handler(worker.on_result, worker, args.dataset_dir)
     
     hotkeys = HotkeyManager()
 
