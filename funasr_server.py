@@ -16,6 +16,8 @@ import sys
 
 # 在导入任何深度学习库之前设置环境变量
 os.environ.setdefault("OMP_NUM_THREADS", "4")
+# 默认使用 CPU 进行推理；如需使用 GPU，可在外部设置环境变量 FUNASR_DEVICE=cuda:0
+os.environ.setdefault("FUNASR_DEVICE", "cpu")
 
 from funasr_config import MODEL_REVISION, MODELS
 
