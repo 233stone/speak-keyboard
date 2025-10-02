@@ -90,7 +90,7 @@ def ensure_logging_dir(config: Dict[str, Any]) -> str:
     os.makedirs(log_dir, exist_ok=True)
     return log_dir
 
-
+# todo:启动时预加载到内存中
 def load_postprocess_config(path: Optional[str] = None) -> Dict[str, Any]:
     """Load postprocess replacement config from JSON file.
 

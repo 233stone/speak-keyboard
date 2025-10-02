@@ -2,7 +2,11 @@
   "case_insensitive": true,
   "replace_map": {
     "放ASR": "FUNASR",
-    "点PY": ".py"
+    "点PY": ".py",
+    "f二": "f2",
+    "圆形图": "原型图",
+    "蜗ning": "warning",
+    "k value": "key-value"
   }
 }
 
