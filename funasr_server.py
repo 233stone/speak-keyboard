@@ -378,7 +378,7 @@ class FunASRServer:
                 logger.info(f"{model_name}模型加载线程耗时: {thread_time:.2f}秒")
 
             # 根据开关决定是否加载 VAD / PUNC（默认启用）
-            load_vad = os.environ.get("FUNASR_USE_VAD", "true").lower() not in ("0", "false", "no")
+            load_vad = os.environ.get("FUNASR_USE_VAD", "false").lower() not in ("0", "false", "no")
             load_punc = os.environ.get("FUNASR_USE_PUNC", "true").lower() not in ("0", "false", "no")
 
             # 创建并启动线程（ASR 必须，VAD/PUNC 可选）
@@ -474,7 +474,7 @@ class FunASRServer:
                 "batch_size_s": 60,
                 "hotword": "",
                 # 默认启用 VAD / PUNC，可在外部通过选项或环境变量关闭
-                "use_vad": os.environ.get("FUNASR_USE_VAD", "true").lower() not in ("0", "false", "no"),
+                "use_vad": os.environ.get("FUNASR_USE_VAD", "false").lower() not in ("0", "false", "no"),
                 "use_punc": os.environ.get("FUNASR_USE_PUNC", "true").lower() not in ("0", "false", "no"),
                 "language": "zh",
             }
