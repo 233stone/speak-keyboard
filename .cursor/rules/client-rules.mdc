@@ -1,0 +1,100 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+
+
+# 项目规范（客户端）
+
+本文档分阶段编写与维护。当前为 v0.1 草案，覆盖代码结构与模块边界；后续章节将分批补充。
+
+## 1. 代码结构与模块边界
+
+- 前端（Vue 3, Vite）：
+  - 入口：`src/main.js`，根组件：`src/App.vue`
+  - 组件：`src/components/`
+    - `Widget.vue`：悬浮窗，内含麦克风交互与状态展示
+    - `Settings.vue`：设置页，标签页式配置与统计
+    - `TitleBar.vue`：自定义标题栏（仅最小化/关闭）
+  - 样式：`src/style.css`（全局样式与通用控件风格）
+
+- 后端（Tauri + Rust）：
+  - 配置：`src-tauri/tauri.conf.json`（窗口、打包）
+  - 逻辑：`src-tauri/src/lib.rs`（命令、托盘、快捷键、窗口策略）
+
+### 模块边界与依赖原则
+
+1) 组件只关心自身 UI 与交互，通过 `invoke` 调 Tauri 命令，不直接耦合窗口策略。
+2) 窗口展示/最小化/隐藏策略统一在 Rust 侧实现，前端仅传入 `windowLabel`。
+3) 全局快捷键、托盘交互统一在 Rust 侧转发到前端事件。
+4) 全局样式统一在 `style.css` 管理，组件内避免覆盖全局基础风格。
+
+## 2. 命名与文件组织
+
+- 目录/文件：
+  - Vue 组件使用帕斯卡命名：`TitleBar.vue`、`Widget.vue`、`Settings.vue`
+  - Rust 模块/函数使用蛇形命名：`start_recording`、`minimize_window`
+  - 资源与公共样式集中在 `public/`、`src/style.css`
+- 变量/常量：
+  - 前端常量全大写+下划线；本地状态用语义化变量名，避免缩写
+  - Rust 遵循 Clippy 提示，未用参数前缀 `_`
+- 导入顺序：标准库 → 第三方 → 本地模块；同组内按字母序
+
+
+## 3. 组件设计与状态管理
+
+- 组件职责：
+  - `TitleBar` 仅负责窗口控制 UI 与触发命令，不承载业务状态。
+  - `Widget` 负责录音交互与展示，业务状态局部于组件内维护（如 `isRecording`）。
+  - `Settings` 负责配置表单、统计展示，状态保存在本组件内，持久化策略后续统一规划。
+- 事件协作：
+  - 全局快捷键由 Rust 转发事件到前端；`Widget` 监听并触发自身逻辑。
+  - 跨组件通信优先使用 Rust 命令 + 事件，不直接引入全局事件总线库。
+- 可测试性：
+  - 复杂逻辑（如词典替换规则）拆分为纯函数模块，便于单测与复用。
+
+## 4. 窗口/标题栏/托盘约定
+
+- 自定义标题栏：
+  - 高度 28px；拖拽区域使用 `-webkit-app-region: drag`；按钮区域 `no-drag`。
+  - 仅最小化与关闭按钮；图标可选。
+- 行为策略（Rust 统一实现）：
+  - `widget`：最小化前 `set_skip_taskbar(false)` → `minimize()`，显示时 `set_skip_taskbar(true)`。
+  - `settings`：直接 `minimize()`；关闭按钮使用 `hide_window`（避免销毁）。
+- 托盘：
+  - 左键单击或菜单“显示主窗口”时：`widget` 恢复显示并确保 `skipTaskbar` 为 `true`。
+
+## 5. API 调用与前后端事件
+
+- 前端只通过 `@tauri-apps/api/core` 的 `invoke()` 调用命令；禁止在组件中硬编码窗口策略。
+- Rust 向前端发事件统一使用 `window.emit(event, payload)`；事件名小写短横线风格（如 `global-shortcut-pressed`）。
+- 命令命名规范：动词下划线，如 `start_recording`、`stop_recording`、`show_window`、`hide_window`、`minimize_window`。
+
+## 6. 样式与资源规范
+
+- 原则：如无必要，勿增实体。
+  - 能用原生/CSS 实现的交互与样式，优先自行实现；避免无谓引入第三方库。
+  - 禁止使用毛玻璃、Acrylic、强透明度等特效；保持纯净、对比清晰的界面。
+- 全局样式集中在 `src/style.css`，组件内仅编写与组件相关的样式，不覆盖全局基础规则。
+- 图标优先使用现有 `Font Awesome` 与简单 SVG；不引入大型 UI 框架。
+
+## 7. 日志与错误处理
+
+- 前端：
+  - 用户可见的失败使用 `console.error` + 轻量提示（未来可统一 Toast 组件）。
+  - 重要流程（录音开始/结束、窗口切换）打印关键日志，方便排查。
+- 后端（Rust）：
+  - 命令处理失败返回 `Err(String)`，尽量包含上下文信息。
+  - 对窗口相关操作失败（如 `set_skip_taskbar`）允许继续流程，但需输出日志。
+
+## 8. 提交规范与代码评审
+
+- 提交信息格式：`type(scope): summary`，例如 `feat(widget): add minimize to taskbar`。
+- PR 要求：
+  - 说明影响范围（前端/后端/配置）与用户可见变化。
+  - 自测步骤与截图（如涉及 UI/行为）。
+  - 关联任务或问题单。
+
+
+
