@@ -37,15 +37,6 @@ import threading
 import time
 from typing import Any, Dict, Optional
 
-# 提前在导入 app 之前分流 stdout：
-# - 保存原始 stdout 用于事件输出
-# - 将 stdout 重定向到 stderr，避免第三方库将日志写入事件通道
-_EVENT_OUT = sys.stdout
-try:
-    sys.stdout = sys.stderr
-except Exception:
-    pass
-
 if __package__ in (None, ""):
     # 允许以 "python app/bridge.py" 运行：注入项目根目录
     import os
@@ -55,6 +46,15 @@ if __package__ in (None, ""):
 
 from app import TranscriptionResult, TranscriptionWorker, load_config, type_text
 from app.plugins.dataset_recorder import wrap_result_handler
+
+# 在导入模块后才分流 stdout
+# - 保存原始 stdout 用于事件输出
+# - 将 stdout 重定向到 stderr，避免第三方库将日志写入事件通道
+_EVENT_OUT = sys.stdout
+try:
+    sys.stdout = sys.stderr
+except Exception:
+    pass
 
 
 logger = logging.getLogger(__name__)
@@ -149,7 +149,13 @@ class BridgeApp:
                 return
 
             try:
+                logger.info(
+                    "[bridge] 准备输出文本，当前待处理=%s，总完成=%s",
+                    stats.get("pending"),
+                    stats.get("completed"),
+                )
                 type_text(result.text, append_newline=append_newline, method=output_method)
+                logger.info("[bridge] 输出文本完成")
             except Exception as exc:  # noqa: BLE001
                 logger.error("输出文本失败: %s", exc, exc_info=True)
                 self.emit_event(
