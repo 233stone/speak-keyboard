@@ -290,7 +290,7 @@ fn find_project_root_for_config() -> PathBuf {
 
 fn resolve_tauri_config_path(file_name: &str) -> PathBuf {
     let root = find_project_root_for_config();
-    root.join("speak-keyboard-tauri").join("src-tauri").join("config").join(file_name)
+    root.join("speak-keyboard-tauri").join("config").join(file_name)
 }
 
 fn resolve_postprocess_path() -> PathBuf {
