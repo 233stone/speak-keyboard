@@ -1,11 +1,10 @@
 sounddevice==0.5.2
 keyboard==0.13.5
 pyperclip==1.11.0
-numpy==2.3.3
 librosa==0.11.0
 soundfile==0.13.1
-onnxruntime==1.19.2
 funasr_onnx==0.4.1
+jieba==0.42.1
 
 # Optional backends for model downloading (recommended)
 # 选其一或都装：用于 AutoModel 拉取/缓存模型
