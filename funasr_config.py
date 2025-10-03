@@ -8,28 +8,28 @@ FunASR模型配置
 import os
 
 # 模型版本，可通过环境变量覆盖
-MODEL_REVISION = os.environ.get("FUNASR_MODEL_REVISION", "v2.0.4")
+MODEL_REVISION = os.environ.get("FUNASR_MODEL_REVISION", "v2.0.5")
 
-# 模型配置
+# 模型配置（默认使用 ONNX 版本，仍可通过环境变量覆盖）
 MODELS = {
     "asr": {
         "name": os.environ.get(
             "FUNASR_ASR_MODEL",
-            "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+            "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx",
         ),
         "type": "asr",
     },
     "vad": {
         "name": os.environ.get(
             "FUNASR_VAD_MODEL",
-            "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+            "iic/speech_fsmn_vad_zh-cn-16k-common-onnx",
         ),
         "type": "vad",
     },
     "punc": {
         "name": os.environ.get(
             "FUNASR_PUNC_MODEL",
-            "iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+            "iic/punc_ct-transformer_zh-cn-common-vocab272727-onnx",
         ),
         "type": "punc",
     },

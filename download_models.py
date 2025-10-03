@@ -11,27 +11,24 @@ import threading
 from funasr_config import MODEL_REVISION, get_models_for_download
 
 def download_model(model_config, progress_callback=None):
-    """下载单个模型"""
+    """下载单个模型（使用 modelscope.snapshot_download，无需 funasr/torch）"""
     model_name = model_config["name"]
     model_type = model_config["type"]
-    
+
     try:
-        from funasr import AutoModel
-        
+        from modelscope.hub.snapshot_download import snapshot_download
+
         if progress_callback:
             progress_callback(model_type, "downloading", 0)
-        
-        # 下载模型
-        AutoModel(
-            model=model_name,
-            model_revision=MODEL_REVISION
-        )
-        
+
+        # 下载到本地缓存目录
+        snapshot_download(model_name, revision=MODEL_REVISION)
+
         if progress_callback:
             progress_callback(model_type, "completed", 100)
-            
+
         return {"success": True, "model": model_type}
-        
+
     except Exception as e:
         if progress_callback:
             progress_callback(model_type, "error", 0, str(e))

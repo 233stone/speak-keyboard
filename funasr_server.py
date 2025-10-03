@@ -10,12 +10,15 @@ import json
 import logging
 import traceback
 import signal
-import tempfile
 import os
 import sys
+import warnings
+
+# 过滤掉 jieba 的 pkg_resources 弃用警告
+warnings.filterwarnings("ignore", category=UserWarning, module="jieba._compat")
 
 # 在导入任何深度学习库之前设置环境变量
-os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("OMP_NUM_THREADS", "8")  # ONNX 推理并行线程数，可提升速度
 # 默认使用 CPU 进行推理；如需使用 GPU，可在外部设置环境变量 FUNASR_DEVICE=cuda:0
 os.environ.setdefault("FUNASR_DEVICE", "cpu")
 
@@ -123,12 +126,20 @@ class FunASRServer:
         """清理所有模型和资源"""
         logger.info("开始清理 FunASR 服务器资源")
         try:
-            # 清理模型引用
-            self.asr_model = None
-            self.vad_model = None
-            self.punc_model = None
+            # 清理模型引用（ONNX 的 InferenceSession 会在对象销毁时自动释放）
+            if self.asr_model is not None:
+                logger.debug("释放 ASR 模型")
+                self.asr_model = None
             
-            # 执行最后一次内存清理
+            if self.vad_model is not None:
+                logger.debug("释放 VAD 模型")
+                self.vad_model = None
+            
+            if self.punc_model is not None:
+                logger.debug("释放标点模型")
+                self.punc_model = None
+            
+            # 执行最后一次内存清理（包括 gc.collect 强制回收）
             self._cleanup_memory()
             
             logger.info("FunASR 服务器资源清理完成")
@@ -153,31 +164,73 @@ class FunASRServer:
             logger.info("使用环境变量指定的设备: %s", env_device)
             return env_device
 
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                cuda_device = "cuda:0"
-                logger.info("检测到可用GPU，使用设备: %s", cuda_device)
-                return cuda_device
-        except Exception as e:
-            logger.debug("检测GPU失败，原因: %s", str(e))
+        # try:
+        #     import torch
+        #
+        #     if torch.cuda.is_available():
+        #         cuda_device = "cuda:0"
+        #         logger.info("检测到可用GPU，使用设备: %s", cuda_device)
+        #         return cuda_device
+        # except Exception as e:
+        #     logger.debug("检测GPU失败，原因: %s", str(e))
 
         return "cpu"
 
     def _load_asr_model(self):
         """加载ASR模型"""
         try:
-            from funasr import AutoModel
+            model_name_lower = str(self.model_names["asr"]).lower()
+            
+            # 如果是 ONNX 模型，使用 funasr_onnx 专用加载器
+            if "onnx" in model_name_lower:
+                from funasr_onnx.paraformer_bin import Paraformer
 
-            logger.info("开始加载ASR模型: %s", self.model_names["asr"])
-            self.asr_model = AutoModel(
-                model=self.model_names["asr"],
-                model_revision=self.model_revision,
-                device=self.device,
-            )
-            logger.info("ASR模型加载完成")
-            return True
+                logger.info("开始加载ASR ONNX模型: %s", self.model_names["asr"])
+
+                # 统一通过 modelscope 指定修订版本下载到本地路径，避免 funasr_onnx 触发导出分支
+                try:
+                    from modelscope.hub.snapshot_download import snapshot_download
+                    model_dir = snapshot_download(
+                        self.model_names["asr"],
+                        revision=self.model_revision,
+                    )
+                except Exception as e:
+                    logger.error("下载 ASR ONNX 模型失败: %s", e)
+                    return False
+
+                # 基本完整性校验，优先使用量化模型
+                quant_file = os.path.join(model_dir, "model_quant.onnx")
+                base_file = os.path.join(model_dir, "model.onnx")
+                use_quantize = False
+                if os.path.exists(quant_file):
+                    use_quantize = True
+                elif not os.path.exists(base_file):
+                    logger.error("ASR 模型目录缺少 model.onnx: %s", model_dir)
+                    return False
+
+                device_id = -1  # CPU
+                if self.device and "cuda" in self.device:
+                    try:
+                        device_id = int(self.device.split(":")[-1])
+                    except Exception:
+                        device_id = 0
+                
+                # 性能优化参数
+                num_threads = int(os.environ.get("OMP_NUM_THREADS", "8"))
+
+                self.asr_model = Paraformer(
+                    str(model_dir),
+                    batch_size=1,
+                    device_id=device_id,
+                    quantize=use_quantize,
+                    intra_op_num_threads=num_threads,  # 线程并行加速
+                )
+                logger.info("ASR ONNX模型加载完成")
+                return True
+            else:
+                logger.error("仅支持 ONNX 模型加载，当前模型名称: %s", self.model_names["asr"]) 
+                return False
+                
         except Exception as e:
             logger.error(f"ASR模型加载失败: {str(e)}")
             logger.debug(traceback.format_exc())
@@ -185,17 +238,49 @@ class FunASRServer:
             return False
 
     def _load_vad_model(self):
-        """加载VAD模型"""
+        """加载VAD模型（使用 funasr_onnx 专用加载器）"""
         try:
-            from funasr import AutoModel
+            from funasr_onnx.vad_bin import Fsmn_vad
 
-            logger.info("开始加载VAD模型: %s", self.model_names["vad"])
-            self.vad_model = AutoModel(
-                model=self.model_names["vad"],
-                model_revision=self.model_revision,
-                device=self.device,
+            logger.info("开始加载VAD ONNX模型: %s", self.model_names["vad"])
+
+            # 统一通过 modelscope 指定修订版本下载到本地路径
+            try:
+                from modelscope.hub.snapshot_download import snapshot_download
+                model_dir = snapshot_download(
+                    self.model_names["vad"],
+                    revision=self.model_revision,
+                )
+            except Exception as e:
+                logger.error("下载 VAD ONNX 模型失败: %s", e)
+                return False
+
+            quant_file = os.path.join(model_dir, "model_quant.onnx")
+            base_file = os.path.join(model_dir, "model.onnx")
+            use_quantize = False
+            if os.path.exists(quant_file):
+                use_quantize = True
+            elif not os.path.exists(base_file):
+                logger.error("VAD 模型目录缺少 model.onnx: %s", model_dir)
+                return False
+
+            device_id = -1  # CPU
+            if self.device and "cuda" in self.device:
+                try:
+                    device_id = int(self.device.split(":")[-1])
+                except Exception:
+                    device_id = 0
+            
+            num_threads = int(os.environ.get("OMP_NUM_THREADS", "8"))
+
+            self.vad_model = Fsmn_vad(
+                str(model_dir),
+                batch_size=1,
+                device_id=device_id,
+                quantize=use_quantize,
+                intra_op_num_threads=num_threads,
             )
-            logger.info("VAD模型加载完成")
+            logger.info("VAD ONNX模型加载完成")
             return True
         except Exception as e:
             logger.error(f"VAD模型加载失败: {str(e)}")
@@ -204,17 +289,49 @@ class FunASRServer:
             return False
 
     def _load_punc_model(self):
-        """加载标点恢复模型"""
+        """加载标点恢复模型（使用 funasr_onnx 专用加载器）"""
         try:
-            from funasr import AutoModel
+            from funasr_onnx.punc_bin import CT_Transformer
 
-            logger.info("开始加载标点恢复模型: %s", self.model_names["punc"])
-            self.punc_model = AutoModel(
-                model=self.model_names["punc"],
-                model_revision=self.model_revision,
-                device=self.device,
+            logger.info("开始加载标点恢复 ONNX模型: %s", self.model_names["punc"])
+
+            # 统一通过 modelscope 指定修订版本下载到本地路径
+            try:
+                from modelscope.hub.snapshot_download import snapshot_download
+                model_dir = snapshot_download(
+                    self.model_names["punc"],
+                    revision=self.model_revision,
+                )
+            except Exception as e:
+                logger.error("下载 标点 ONNX 模型失败: %s", e)
+                return False
+
+            quant_file = os.path.join(model_dir, "model_quant.onnx")
+            base_file = os.path.join(model_dir, "model.onnx")
+            use_quantize = False
+            if os.path.exists(quant_file):
+                use_quantize = True
+            elif not os.path.exists(base_file):
+                logger.error("标点模型目录缺少 model.onnx: %s", model_dir)
+                return False
+
+            device_id = -1  # CPU
+            if self.device and "cuda" in self.device:
+                try:
+                    device_id = int(self.device.split(":")[-1])
+                except Exception:
+                    device_id = 0
+            
+            num_threads = int(os.environ.get("OMP_NUM_THREADS", "8"))
+
+            self.punc_model = CT_Transformer(
+                str(model_dir),
+                batch_size=1,
+                device_id=device_id,
+                quantize=use_quantize,
+                intra_op_num_threads=num_threads,
             )
-            logger.info("标点恢复模型加载完成")
+            logger.info("标点恢复 ONNX模型加载完成")
             return True
         except Exception as e:
             logger.error(f"标点恢复模型加载失败: {str(e)}")
@@ -234,6 +351,22 @@ class FunASRServer:
             logger.info("正在并行初始化FunASR模型...")
             start_time = time.time()
 
+            # 预导入 funasr_onnx 子模块，避免多线程导入导致的 ModuleLock 死锁
+            try:
+                import importlib
+                pre_modules = (
+                    "funasr_onnx.utils.utils",
+                    "funasr_onnx.utils.frontend",
+                    "funasr_onnx.paraformer_bin",
+                    "funasr_onnx.vad_bin",
+                    "funasr_onnx.punc_bin",
+                )
+                for m in pre_modules:
+                    importlib.import_module(m)
+                logger.info("funasr_onnx 模块预导入完成")
+            except Exception as pre_e:
+                logger.warning("funasr_onnx 预导入失败: %s", str(pre_e))
+
             # 创建加载结果存储
             results = {}
 
@@ -244,24 +377,34 @@ class FunASRServer:
                 thread_time = time.time() - thread_start
                 logger.info(f"{model_name}模型加载线程耗时: {thread_time:.2f}秒")
 
-            # 创建并启动三个并行线程
+            # 根据开关决定是否加载 VAD / PUNC（默认启用）
+            load_vad = os.environ.get("FUNASR_USE_VAD", "true").lower() not in ("0", "false", "no")
+            load_punc = os.environ.get("FUNASR_USE_PUNC", "true").lower() not in ("0", "false", "no")
+
+            # 创建并启动线程（ASR 必须，VAD/PUNC 可选）
             threads = [
                 threading.Thread(
                     target=load_model_thread,
                     args=("asr", self._load_asr_model),
                     daemon=True,
-                ),
-                threading.Thread(
-                    target=load_model_thread,
-                    args=("vad", self._load_vad_model),
-                    daemon=True,
-                ),
-                threading.Thread(
-                    target=load_model_thread,
-                    args=("punc", self._load_punc_model),
-                    daemon=True,
-                ),
+                )
             ]
+            if load_vad:
+                threads.append(
+                    threading.Thread(
+                        target=load_model_thread,
+                        args=("vad", self._load_vad_model),
+                        daemon=True,
+                    )
+                )
+            if load_punc:
+                threads.append(
+                    threading.Thread(
+                        target=load_model_thread,
+                        args=("punc", self._load_punc_model),
+                        daemon=True,
+                    )
+                )
 
             # 启动所有线程
             for thread in threads:
@@ -330,58 +473,69 @@ class FunASRServer:
             default_options = {
                 "batch_size_s": 60,
                 "hotword": "",
-                "use_vad": True,
-                "use_punc": True,  # 使用FunASR自带的标点恢复
+                # 默认启用 VAD / PUNC，可在外部通过选项或环境变量关闭
+                "use_vad": os.environ.get("FUNASR_USE_VAD", "true").lower() not in ("0", "false", "no"),
+                "use_punc": os.environ.get("FUNASR_USE_PUNC", "true").lower() not in ("0", "false", "no"),
                 "language": "zh",
             }
 
             if options:
                 default_options.update(options)
 
-            # 执行语音识别
+            # 执行语音识别（VAD 处理）
             if default_options["use_vad"] and self.vad_model:
-                vad_result = self.vad_model.generate(
-                    input=audio_path, batch_size_s=default_options["batch_size_s"]
-                )
-                logger.info("VAD处理完成")
+                # funasr_onnx.Fsmn_vad 直接调用，返回 segments [[start_ms, end_ms], ...]
+                vad_result = self.vad_model(audio_path)
+                logger.info("VAD处理完成，检测到 %s 个语音段", len(vad_result[0]) if vad_result else 0)
             elif default_options["use_vad"] and not self.vad_model:
                 logger.warning("use_vad=True 但VAD模型未加载，跳过VAD处理")
 
-            # 执行ASR识别
-            asr_result = self.asr_model.generate(
-                input=audio_path,
-                batch_size_s=default_options["batch_size_s"],
-                hotword=default_options["hotword"],
-                cache={},
-            )
+            # 执行ASR识别（根据模型类型使用不同接口）
+            if hasattr(self.asr_model, "generate"):
+                # PyTorch 模型使用 generate 方法
+                asr_result = self.asr_model.generate(
+                    input=audio_path,
+                    batch_size_s=default_options["batch_size_s"],
+                    hotword=default_options["hotword"],
+                    cache={},
+                )
+            else:
+                # ONNX 模型直接调用（funasr_onnx.Paraformer）
+                asr_result = self.asr_model([audio_path])
 
-            # 提取识别文本
+            # 提取识别文本（兼容 PyTorch 和 ONNX 两种格式）
             if isinstance(asr_result, list) and len(asr_result) > 0:
-                if isinstance(asr_result[0], dict) and "text" in asr_result[0]:
-                    raw_text = asr_result[0]["text"]
+                first_item = asr_result[0]
+                # PyTorch 格式: [{"text": "..."}]
+                if isinstance(first_item, dict) and "text" in first_item:
+                    raw_text = first_item["text"]
+                # ONNX 格式: [{"preds": (text_string, token_list)}]
+                elif isinstance(first_item, dict) and "preds" in first_item:
+                    preds = first_item["preds"]
+                    if isinstance(preds, tuple) and len(preds) > 0:
+                        raw_text = str(preds[0])
+                    else:
+                        raw_text = str(preds)
                 else:
-                    raw_text = str(asr_result[0])
+                    raw_text = str(first_item)
             else:
                 raw_text = str(asr_result)
 
             logger.info(f"ASR识别完成，原始文本: {raw_text[:100]}...")
 
-            # 使用FunASR进行标点恢复
+            # 使用标点恢复（ONNX 的 CT_Transformer 直接调用）
             final_text = raw_text
             if default_options["use_punc"] and self.punc_model and raw_text.strip():
                 try:
-                    punc_result = self.punc_model.generate(input=raw_text)
-                    if isinstance(punc_result, list) and len(punc_result) > 0:
-                        if (
-                            isinstance(punc_result[0], dict)
-                            and "text" in punc_result[0]
-                        ):
-                            final_text = punc_result[0]["text"]
-                        else:
-                            final_text = str(punc_result[0])
-                    logger.info("FunASR标点恢复完成")
+                    # funasr_onnx.CT_Transformer 返回 (text_with_punc, punc_list)
+                    punc_result = self.punc_model(raw_text)
+                    if isinstance(punc_result, tuple) and len(punc_result) > 0:
+                        final_text = str(punc_result[0])
+                    else:
+                        final_text = str(punc_result)
+                    logger.info("标点恢复完成")
                 except Exception as e:
-                    logger.warning(f"FunASR标点恢复失败，使用原始文本: {str(e)}")
+                    logger.warning(f"标点恢复失败，使用原始文本: {str(e)}")
 
             duration = self._get_audio_duration(audio_path)
             self.transcription_count += 1
@@ -397,7 +551,9 @@ class FunASRServer:
                 ),
                 "duration": duration,
                 "language": "zh-CN",
-                "model_type": "pytorch",  # 标识使用的是pytorch版本
+                "model_type": (
+                    "onnx" if "onnx" in str(self.model_names.get("asr", "")).lower() else "pytorch"
+                ),
                 "models": self.model_names,
             }
 
@@ -420,7 +576,7 @@ class FunASRServer:
         try:
             import librosa
 
-            duration = librosa.get_duration(filename=audio_path)
+            duration = librosa.get_duration(path=audio_path)
             self.total_audio_duration += duration  # 累计音频时长
             return duration
         except Exception as e:
@@ -436,19 +592,19 @@ class FunASRServer:
             gc.collect()
             
             # 如果使用GPU，清理CUDA缓存
-            if self.device and self.device.startswith("cuda"):
-                try:
-                    import torch
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                        # 获取当前显存使用情况
-                        allocated = torch.cuda.memory_allocated() / (1024 ** 2)  # MB
-                        reserved = torch.cuda.memory_reserved() / (1024 ** 2)  # MB
-                        logger.info(
-                            f"CUDA缓存已清理，当前显存 - 已分配: {allocated:.2f}MB, 已保留: {reserved:.2f}MB"
-                        )
-                except Exception as cuda_err:
-                    logger.warning(f"CUDA缓存清理失败: {str(cuda_err)}")
+            # if self.device and self.device.startswith("cuda"):
+            #     try:
+            #         import torch
+            #         if torch.cuda.is_available():
+            #             torch.cuda.empty_cache()
+            #             # 获取当前显存使用情况
+            #             allocated = torch.cuda.memory_allocated() / (1024 ** 2)  # MB
+            #             reserved = torch.cuda.memory_reserved() / (1024 ** 2)  # MB
+            #             logger.info(
+            #                 f"CUDA缓存已清理，当前显存 - 已分配: {allocated:.2f}MB, 已保留: {reserved:.2f}MB"
+            #             )
+            #     except Exception as cuda_err:
+            #         logger.warning(f"CUDA缓存清理失败: {str(cuda_err)}")
             
             logger.info("内存清理完成")
         except Exception as e:
