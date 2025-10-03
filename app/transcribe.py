@@ -31,6 +31,8 @@ class TranscriptionResult:
     inference_latency: float
     confidence: float
     error: Optional[str] = None
+    # 自动修正次数（仅统计对最终 text 的替换次数，排除 raw_text）
+    corrections: int = 0
 
 
 class TranscriptionWorker:
@@ -405,10 +407,12 @@ class TranscriptionWorker:
             case_insensitive = bool(post_cfg.get("case_insensitive", True))
 
             # todo:后期词多了使用前缀树加速
-            def _apply_replacements(value: str, label: str) -> str:
+            def _apply_replacements(value: str) -> tuple[str, int]:
+                """返回 (替换后的文本, 发生的替换次数)。仅统计发生了多少次替换。"""
                 if not value or not replace_map:
-                    return value
+                    return value, 0
                 try:
+                    corrections_count = 0
                     if case_insensitive:
                         import re
                         for src, dst in replace_map.items():
@@ -417,21 +421,24 @@ class TranscriptionWorker:
                             pattern = re.compile(re.escape(src), flags=re.IGNORECASE)
                             new_val = pattern.sub(dst, value)
                             if new_val != value:
-                                logger.info("后处理替换(%s): %r -> %r", label, src, dst)
+                                logger.info("后处理替换: %r -> %r", src, dst)
+                                corrections_count += 1
                             value = new_val
                     else:
                         for src, dst in replace_map.items():
                             if not src:
                                 continue
                             if src in value:
-                                logger.info("后处理替换(%s): %r -> %r", label, src, dst)
+                                logger.info("后处理替换: %r -> %r", src, dst)
+                                corrections_count += 1
                                 value = value.replace(src, dst)
+                    return value, corrections_count
                 except Exception as exc:
-                    logger.warning("应用后处理替换失败(%s): %s", label, exc)
-                return value
+                    logger.warning("应用后处理替换失败: %s", exc)
+                    return value, 0
 
-            final_text = _apply_replacements(final_text, "text")
-            raw_text = _apply_replacements(raw_text, "raw")
+            final_text, corr_text = _apply_replacements(final_text)
+            raw_text, _ = _apply_replacements(raw_text)
 
             result = TranscriptionResult(
                 text=final_text,
@@ -439,6 +446,7 @@ class TranscriptionWorker:
                 duration=asr_result.get("duration", 0.0),
                 inference_latency=inference_latency,
                 confidence=asr_result.get("confidence", 0.0),
+                corrections=int(corr_text),
             )
 
         if self.on_result:
