@@ -439,6 +439,10 @@ class FunASRServer:
             logger.info(
                 f"所有FunASR模型并行初始化完成，总耗时: {total_time:.2f}秒"
             )
+            
+            # 预热librosa，避免首次load时的初始化延迟
+            self._warmup_librosa()
+            
             return {
                 "success": True,
                 "message": f"FunASR模型并行初始化成功，耗时: {total_time:.2f}秒",
@@ -583,6 +587,46 @@ class FunASRServer:
             logger.debug(f"获取音频时长失败: {str(e)}")
             return 0.0
 
+    def _warmup_librosa(self):
+        """预热librosa库，避免首次load时的初始化延迟（这是真正的问题所在）"""
+        try:
+            logger.info("开始预热librosa，触发音频库初始化...")
+            warmup_start = time.time()
+            
+            import tempfile
+            import numpy as np
+            import wave
+            
+            # 创建一个极短的测试音频（10ms）
+            sample_rate = 16000
+            samples = int(sample_rate * 0.01)
+            audio_data = np.zeros(samples, dtype=np.int16)
+            
+            # 写入临时WAV文件
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
+                tmp_path = tmp_file.name
+                with wave.open(tmp_path, 'wb') as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(sample_rate)
+                    wf.writeframes(audio_data.tobytes())
+            
+            try:
+                # 调用librosa.load触发初始化（这是funasr_onnx内部使用的）
+                import librosa
+                _, _ = librosa.load(tmp_path, sr=16000)
+                
+                warmup_time = time.time() - warmup_start
+                logger.info(f"librosa预热完成，耗时: {warmup_time:.2f}秒")
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+                    
+        except Exception as e:
+            logger.warning(f"librosa预热失败（不影响使用）: {str(e)}")
+    
     def _cleanup_memory(self):
         """生产环境内存清理"""
         try:
