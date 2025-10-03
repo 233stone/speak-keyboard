@@ -957,8 +957,6 @@ pub fn run() {
                         if let Some(dir) = bridge_exe.parent() {
                             c.current_dir(dir);
                         }
-                        // 设置环境变量标识bridge模式
-                        c.env("SK_BRIDGE_MODE", "1");
                         c
                     } else {
                         println!("[tauri] 未检测到打包的 bridge，可回退到 Python 启动 app.bridge");
@@ -968,21 +966,15 @@ pub fn run() {
                         // c.arg("--save-dataset");
                         // c.arg("--dataset-dir").arg("dataset");
                         c.current_dir(&project_root);
-                        // 设置环境变量标识bridge模式
-                        c.env("SK_BRIDGE_MODE", "1");
                         c
                     };
 
-                    // Windows: 使用DETACHED_PROCESS避免性能问题
-                    // CREATE_NO_WINDOW会导致进程以后台优先级运行，严重影响ONNX推理性能
+                    // Windows: 隐藏子进程控制台窗口
                     #[cfg(windows)]
                     {
                         use std::os::windows::process::CommandExt;
-                        // DETACHED_PROCESS: 子进程独立运行，不继承控制台
-                        // CREATE_NEW_PROCESS_GROUP: 新进程组，避免Ctrl+C传播
-                        const DETACHED_PROCESS: u32 = 0x00000008;
-                        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-                        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+                        const CREATE_NO_WINDOW: u32 = 0x08000000;
+                        cmd.creation_flags(CREATE_NO_WINDOW);
                     }
 
                     // 通过管道捕获 stdout（事件）与 stderr（日志），避免冒出控制台
