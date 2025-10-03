@@ -247,6 +247,12 @@ class BridgeApp:
             self.worker.cleanup()
         except Exception as exc:  # noqa: BLE001
             logger.debug("清理工作线程时发生错误（忽略）: %s", exc)
+        
+        try:
+            # 显式清理 FunASR 服务器资源
+            self.worker.fun_server.cleanup()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("清理 FunASR 服务器时发生错误（忽略）: %s", exc)
 
         logger.info("[bridge] shutdown 资源清理完成，准备发送事件")
         self.emit_event("bridge_shutdown", stats=self.worker.transcription_stats)

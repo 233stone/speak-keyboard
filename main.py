@@ -86,12 +86,31 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.info("用户中断，正在退出...")
     finally:
-        worker.stop()
-        worker.cleanup()
-        hotkeys.cleanup()
-        # 使用 os._exit(0) 立即终止进程，避免触发 FunASRServer 析构函数导致的延迟
-        import os
-        os._exit(0)
+        # 清理所有资源
+        try:
+            worker.stop()
+        except Exception as exc:
+            logger.debug("停止 worker 时出错: %s", exc)
+        
+        try:
+            worker.cleanup()
+        except Exception as exc:
+            logger.debug("清理 worker 时出错: %s", exc)
+        
+        try:
+            # 显式清理 FunASR 模型资源
+            worker.fun_server.cleanup()
+        except Exception as exc:
+            logger.debug("清理 FunASR 服务器时出错: %s", exc)
+        
+        try:
+            hotkeys.cleanup()
+        except Exception as exc:
+            logger.debug("清理热键时出错: %s", exc)
+        
+        logger.info("所有资源已清理，正常退出")
+        import sys
+        sys.exit(0)
 
 
 def _make_result_handler(output_method: str, append_newline: bool, worker: TranscriptionWorker):
